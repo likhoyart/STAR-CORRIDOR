@@ -1,0 +1,887 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no" />
+<title>STAR CORRIDOR — refined</title>
+<style>
+  html,body{
+    margin:0; height:100%; overflow:hidden; background:#020202;
+    font-family:"Courier New", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color:#fff; touch-action:none;
+  }
+  body{ display:grid; place-items:center; }
+  .shell{
+    width:min(100vw,430px);
+    height:min(100vh,860px);
+    padding:8px;
+  }
+  .screen{
+    width:100%; height:100%; position:relative; overflow:hidden;
+    border-radius:56px; border:2px solid rgba(255,255,255,.92);
+    background:#050505;
+    box-shadow:
+      inset 0 0 18px rgba(255,255,255,.06),
+      0 0 24px rgba(255,255,255,.08);
+  }
+  .screen::before{
+    content:"";
+    position:absolute; inset:0; pointer-events:none;
+    background:repeating-linear-gradient(
+      to bottom,
+      rgba(255,255,255,.028) 0px,
+      rgba(255,255,255,.028) 1px,
+      rgba(0,0,0,.06) 2px,
+      rgba(0,0,0,.06) 4px
+    );
+    mix-blend-mode:screen;
+    opacity:.86;
+    z-index:3;
+  }
+  .screen::after{
+    content:"";
+    position:absolute; inset:-2%; pointer-events:none;
+    background:radial-gradient(ellipse at center, transparent 58%, rgba(0,0,0,.34) 100%);
+    z-index:4;
+  }
+  canvas{
+    display:block; width:100%; height:100%;
+    image-rendering:pixelated; image-rendering:crisp-edges;
+  }
+</style>
+</head>
+<body>
+<div class="shell">
+  <div class="screen">
+    <canvas id="game" width="390" height="780"></canvas>
+  </div>
+</div>
+
+<script>
+(() => {
+"use strict";
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d", { alpha:false });
+const W = canvas.width, H = canvas.height;
+ctx.imageSmoothingEnabled = false;
+
+const SAVE_KEY = "star-corridor-refined-save-v1";
+const defaults = {
+  hi: 0,
+  credits: 0,
+  upgrades: { shield:0, fire:0, boost:0, engine:0, weapon:0 },
+  sfx: true
+};
+let save = loadSave();
+
+function loadSave(){
+  try{
+    const s = JSON.parse(localStorage.getItem(SAVE_KEY)||"null");
+    if(!s) return structuredClone(defaults);
+    return {
+      ...structuredClone(defaults),
+      ...s,
+      upgrades: { ...defaults.upgrades, ...(s.upgrades||{}) }
+    };
+  }catch(e){ return structuredClone(defaults); }
+}
+function persist(){ localStorage.setItem(SAVE_KEY, JSON.stringify(save)); }
+
+const state = {
+  screen:"menu",
+  menuIndex:0,
+  upgradeIndex:0,
+  settingsIndex:0,
+  pause:false,
+  time:0,
+  last:performance.now(),
+  stars:[],
+  particles:[],
+  asteroids:[],
+  enemies:[],
+  enemyBullets:[],
+  bullets:[],
+  score:0,
+  sectorMajor:1,
+  sectorMinor:1,
+  speed:1,
+  flash:0,
+  shake:0,
+  spawnTimer:0,
+  enemyTimer:0,
+  pointerDown:false,
+  pointerX:W/2,
+  player:null
+};
+
+for(let i=0;i<95;i++){
+  state.stars.push({
+    x: Math.random()*W,
+    y: Math.random()*H,
+    s: Math.random() < .82 ? 1 : 2,
+    v: .15 + Math.random() * 1.1,
+    a: .2 + Math.random() * .8
+  });
+}
+
+const keys = {};
+addEventListener("keydown", e => {
+  keys[e.code] = true;
+  if(["ArrowLeft","ArrowRight","Space","ArrowUp","ArrowDown","Enter"].includes(e.code)) e.preventDefault();
+  onKeyPress(e.code);
+});
+addEventListener("keyup", e => keys[e.code] = false);
+
+canvas.addEventListener("pointerdown", e => {
+  const p = getPointer(e);
+  state.pointerDown = true;
+  state.pointerX = p.x;
+  onPointer(p.x,p.y);
+});
+canvas.addEventListener("pointermove", e => {
+  if(!state.pointerDown) return;
+  const p = getPointer(e);
+  state.pointerX = p.x;
+});
+addEventListener("pointerup", () => state.pointerDown = false);
+
+function getPointer(e){
+  const r = canvas.getBoundingClientRect();
+  return {
+    x: (e.clientX-r.left)/r.width * W,
+    y: (e.clientY-r.top)/r.height * H
+  };
+}
+
+function onKeyPress(code){
+  if(state.screen === "game"){
+    if(code === "Escape" || code === "KeyP"){
+      state.pause = !state.pause;
+      blip(state.pause ? 210 : 460, .06, .05);
+    }
+    return;
+  }
+
+  if(state.screen === "menu"){
+    if(code === "ArrowUp" || code === "KeyW"){ state.menuIndex = (state.menuIndex+3)%4; blip(360,.04,.03); }
+    if(code === "ArrowDown" || code === "KeyS"){ state.menuIndex = (state.menuIndex+1)%4; blip(420,.04,.03); }
+    if(code === "Enter" || code === "Space") selectMenu();
+  }
+  else if(state.screen === "upgrades"){
+    if(code === "ArrowUp" || code === "KeyW"){ state.upgradeIndex = (state.upgradeIndex+4)%5; blip(360,.04,.03); }
+    if(code === "ArrowDown" || code === "KeyS"){ state.upgradeIndex = (state.upgradeIndex+1)%5; blip(420,.04,.03); }
+    if(code === "Enter" || code === "Space") buyUpgrade();
+    if(code === "Escape" || code === "KeyB") { state.screen = "menu"; blip(280,.06,.04); }
+  }
+  else if(state.screen === "highscore" || state.screen === "settings"){
+    if(code === "Escape" || code === "Enter" || code === "Space") { state.screen = "menu"; blip(280,.06,.04); }
+    if(state.screen === "settings" && (code === "ArrowDown" || code === "ArrowUp" || code === "KeyW" || code === "KeyS")) {
+      state.settingsIndex = (state.settingsIndex+1)%1;
+    }
+    if(state.screen === "settings" && (code === "KeyA" || code === "KeyD" || code === "Enter" || code === "Space")){
+      save.sfx = !save.sfx; persist(); blip(650,.05,.04);
+    }
+  }
+  else if(state.screen === "gameover"){
+    if(code === "Enter" || code === "Space") startGame();
+    if(code === "Escape"){ state.screen="menu"; blip(280,.06,.04); }
+    if(code === "ArrowDown" || code === "ArrowUp"){ /* no-op simplified */ }
+  }
+}
+
+function onPointer(x,y){
+  ensureAudio();
+  if(audio.state === "suspended") audio.resume();
+
+  if(state.screen === "menu"){
+    const ys = [417, 469, 521, 573];
+    const idx = ys.findIndex(v => Math.abs(y-v) < 24);
+    if(idx >= 0){ state.menuIndex = idx; selectMenu(); }
+  } else if(state.screen === "upgrades"){
+    const ys = [223, 303, 383, 463, 543];
+    const idx = ys.findIndex(v => Math.abs(y-v) < 30);
+    if(idx >= 0){ state.upgradeIndex = idx; buyUpgrade(); }
+    else if(y > 690){ state.screen = "menu"; blip(280,.06,.04); }
+  } else if(state.screen === "gameover"){
+    if(y > 517 && y < 562) startGame();
+    else if(y > 562 && y < 610) { state.screen = "menu"; blip(280,.06,.04); }
+  } else if(state.screen === "settings"){
+    if(y > 320 && y < 380){ save.sfx = !save.sfx; persist(); blip(650,.05,.04); }
+    else state.screen = "menu";
+  } else if(state.screen === "highscore"){
+    state.screen = "menu";
+  }
+}
+
+function selectMenu(){
+  blip(700,.08,.05);
+  if(state.menuIndex === 0) startGame();
+  if(state.menuIndex === 1) state.screen = "upgrades";
+  if(state.menuIndex === 2) state.screen = "highscore";
+  if(state.menuIndex === 3) state.screen = "settings";
+}
+
+const upgrades = [
+  { key:"shield", label:"SHIELD", cost:50 },
+  { key:"fire",   label:"FIRE RATE", cost:100 },
+  { key:"boost",  label:"BOOST", cost:75 },
+  { key:"engine", label:"ENGINE", cost:120 },
+  { key:"weapon", label:"WEAPON", cost:150 }
+];
+
+function buyUpgrade(){
+  const u = upgrades[state.upgradeIndex];
+  const lvl = save.upgrades[u.key];
+  if(lvl >= 5){ fail(); return; }
+  const cost = Math.floor(u.cost * (1 + lvl * .65));
+  if(save.credits < cost){ fail(); return; }
+  save.credits -= cost;
+  save.upgrades[u.key]++;
+  persist();
+  powerup();
+}
+
+function startGame(){
+  state.screen = "game";
+  state.pause = false;
+  state.score = 0;
+  state.sectorMajor = 1;
+  state.sectorMinor = 1;
+  state.speed = 1;
+  state.flash = .24;
+  state.shake = 0;
+  state.spawnTimer = 0;
+  state.enemyTimer = 1.2;
+  state.asteroids.length = 0;
+  state.enemies.length = 0;
+  state.enemyBullets.length = 0;
+  state.bullets.length = 0;
+  state.particles.length = 0;
+  state.player = {
+    x: W/2, y: H-160, w: 18, h: 28,
+    hp: 4 + save.upgrades.shield,
+    maxHp: 4 + save.upgrades.shield,
+    inv: 0,
+    fireCd: 0,
+    boost: 100
+  };
+  startTone();
+}
+
+function endGame(){
+  if(!state.player) return;
+  explode(state.player.x, state.player.y, 48, true);
+  state.flash = .6;
+  state.shake = 14;
+  const credits = Math.floor(state.score / 120);
+  save.credits += credits;
+  save.hi = Math.max(save.hi, Math.floor(state.score));
+  persist();
+  state.screen = "gameover";
+  gameOverTone();
+}
+
+function update(dt){
+  state.time += dt;
+  if(state.flash > 0) state.flash -= dt;
+  if(state.shake > 0) state.shake = Math.max(0, state.shake - dt*24);
+
+  for(const s of state.stars){
+    s.y += s.v * (state.screen === "game" ? 1.2 + state.speed*.45 : .35);
+    if(s.y > H+2){ s.y = -2; s.x = Math.random()*W; }
+  }
+
+  for(let i=state.particles.length-1;i>=0;i--){
+    const p = state.particles[i];
+    p.x += p.vx*dt;
+    p.y += p.vy*dt;
+    p.vy += p.g*dt;
+    p.life -= dt;
+    if(p.life <= 0) state.particles.splice(i,1);
+  }
+
+  if(state.screen !== "game" || state.pause) return;
+
+  const p = state.player;
+  if(p.inv > 0) p.inv -= dt;
+  p.fireCd -= dt;
+
+  state.speed = Math.min(5, 1 + state.time/30);
+  const totalSector = 1 + Math.floor((state.time%99999)/17);
+  state.sectorMajor = 1 + Math.floor(totalSector / 3);
+  state.sectorMinor = 1 + (totalSector % 3);
+  state.score += dt * (10 + state.speed*7);
+
+  let move = 0;
+  if(keys.ArrowLeft || keys.KeyA) move -= 1;
+  if(keys.ArrowRight || keys.KeyD) move += 1;
+  const engineMul = 1 + save.upgrades.engine*.12;
+  p.x += move * 190 * engineMul * dt;
+
+  if(state.pointerDown){
+    const target = Math.max(26, Math.min(W-26, state.pointerX));
+    p.x += (target - p.x) * Math.min(1, dt * 10 * engineMul);
+  }
+  p.x = Math.max(22, Math.min(W-22, p.x));
+
+  // boost
+  const boosting = (keys.Space || keys.ShiftLeft || keys.ShiftRight) && p.boost > 0;
+  if(boosting){
+    p.boost = Math.max(0, p.boost - dt*34);
+    state.score += dt*25;
+    if(Math.random() < .33) trailParticle(p.x, p.y+16, true);
+  } else {
+    p.boost = Math.min(100, p.boost + dt*7.5);
+  }
+
+  // autofire
+  const fireRate = Math.max(.12, .3 - save.upgrades.fire*.034);
+  if(p.fireCd <= 0){
+    fire();
+    p.fireCd = fireRate;
+  }
+
+  state.spawnTimer -= dt;
+  if(state.spawnTimer <= 0){
+    spawnAsteroid();
+    state.spawnTimer = Math.max(.18, .62 - state.speed*.06) * (.75 + Math.random()*.6);
+  }
+
+  state.enemyTimer -= dt;
+  if(state.enemyTimer <= 0){
+    spawnEnemy();
+    state.enemyTimer = Math.max(1.5, 4.5 - state.speed*.36) * (.8 + Math.random()*.65);
+  }
+
+  for(let i=state.bullets.length-1;i>=0;i--){
+    const b = state.bullets[i];
+    b.y -= b.v*dt;
+    if(b.y < -10){ state.bullets.splice(i,1); continue; }
+  }
+
+  for(let i=state.enemyBullets.length-1;i>=0;i--){
+    const b = state.enemyBullets[i];
+    b.y += b.v*dt;
+    if(b.y > H+12){ state.enemyBullets.splice(i,1); continue; }
+    if(pointInRect(b.x,b.y,p) && p.inv <= 0){
+      damagePlayer(b.x,b.y);
+      state.enemyBullets.splice(i,1);
+    }
+  }
+
+  for(let i=state.asteroids.length-1;i>=0;i--){
+    const a = state.asteroids[i];
+    a.y += a.v*dt;
+    a.rot += a.rv*dt;
+    if(a.y > H+40){ state.asteroids.splice(i,1); continue; }
+    if(circleHitsRect(a,p) && p.inv <= 0){
+      damagePlayer(a.x,a.y);
+      state.asteroids.splice(i,1);
+      continue;
+    }
+  }
+
+  for(let i=state.enemies.length-1;i>=0;i--){
+    const e = state.enemies[i];
+    e.y += e.v*dt;
+    e.phase += dt;
+    e.x += Math.sin(e.phase*3.2) * 18 * dt;
+    e.fireCd -= dt;
+    if(e.fireCd <= 0){
+      state.enemyBullets.push({ x:e.x, y:e.y+10, v:125 + state.speed*18 });
+      e.fireCd = 1.2 + Math.random()*1.3;
+      enemyShootTone();
+    }
+    if(e.y > H+22){ state.enemies.splice(i,1); continue; }
+    if(rectHitsRect(p,e) && p.inv <= 0){
+      damagePlayer(e.x,e.y);
+      state.enemies.splice(i,1);
+    }
+  }
+
+  // collisions bullets vs asteroids/enemies
+  for(let bi=state.bullets.length-1; bi>=0; bi--){
+    const b = state.bullets[bi];
+    let removed = false;
+
+    for(let ai=state.asteroids.length-1; ai>=0; ai--){
+      const a = state.asteroids[ai];
+      if(dist2(b.x,b.y,a.x,a.y) < (a.r+3)*(a.r+3)){
+        a.hp -= 1 + save.upgrades.weapon*.35;
+        spark(a.x,a.y);
+        state.bullets.splice(bi,1); removed = true;
+        if(a.hp <= 0){
+          explode(a.x,a.y,a.r*1.25,false);
+          state.score += 28 + a.r*2.4;
+          state.asteroids.splice(ai,1);
+        }
+        break;
+      }
+    }
+    if(removed) continue;
+
+    for(let ei=state.enemies.length-1; ei>=0; ei--){
+      const e = state.enemies[ei];
+      if(Math.abs(b.x-e.x) < 11 && Math.abs(b.y-e.y) < 11){
+        e.hp -= 1 + save.upgrades.weapon*.45;
+        spark(e.x,e.y);
+        state.bullets.splice(bi,1); removed = true;
+        if(e.hp <= 0){
+          explode(e.x,e.y,22,false);
+          state.score += 90;
+          state.enemies.splice(ei,1);
+        }
+        break;
+      }
+    }
+  }
+
+  if(Math.random() < .22) trailParticle(p.x + (Math.random()-.5)*4, p.y+18, false);
+}
+
+function fire(){
+  const p = state.player;
+  state.bullets.push({ x:p.x, y:p.y-18, v:340 });
+  if(save.upgrades.weapon >= 4){
+    state.bullets.push({ x:p.x-6, y:p.y-11, v:325 });
+    state.bullets.push({ x:p.x+6, y:p.y-11, v:325 });
+  }
+  laserTone();
+}
+function spawnAsteroid(){
+  const r = 6 + Math.random()*12;
+  state.asteroids.push({
+    x: 16 + Math.random()*(W-32),
+    y: -30,
+    r,
+    hp: Math.max(1, Math.round(r/9)),
+    v: 76 + state.speed*28 + Math.random()*42,
+    rot: Math.random()*6.28,
+    rv: (Math.random()-.5)*1.5
+  });
+}
+function spawnEnemy(){
+  state.enemies.push({
+    x: 30 + Math.random()*(W-60),
+    y: -20,
+    w: 20, h: 18,
+    hp: 2 + Math.floor(state.sectorMajor/3),
+    v: 66 + state.speed*15,
+    fireCd: .8 + Math.random()*1.2,
+    phase: Math.random()*6.28
+  });
+}
+function damagePlayer(x,y){
+  const p = state.player;
+  p.hp--;
+  p.inv = .95;
+  state.shake = 8;
+  state.flash = .14;
+  explode(x,y,16,false);
+  hitTone();
+  if(p.hp <= 0) setTimeout(endGame, 50);
+}
+
+function pointInRect(x,y,r){ return Math.abs(x-r.x) < r.w/2 && Math.abs(y-r.y) < r.h/2; }
+function rectHitsRect(a,b){ return Math.abs(a.x-b.x) < (a.w+b.w)/2 && Math.abs(a.y-b.y) < (a.h+b.h)/2; }
+function circleHitsRect(c,r){
+  const dx = Math.abs(c.x-r.x), dy = Math.abs(c.y-r.y);
+  if(dx > r.w/2 + c.r || dy > r.h/2 + c.r) return false;
+  if(dx <= r.w/2 || dy <= r.h/2) return true;
+  const qx = dx - r.w/2, qy = dy - r.h/2;
+  return qx*qx + qy*qy <= c.r*c.r;
+}
+function dist2(x1,y1,x2,y2){ const dx=x1-x2, dy=y1-y2; return dx*dx+dy*dy; }
+
+const explosionColors = ["#ff3b00","#ff7300","#ffb000","#ffe066","#ffffff","#00d8ff"];
+
+function explode(x,y,size,major){
+  const count = Math.floor((major?42:18) + size*.55);
+  for(let i=0;i<count;i++){
+    const a = Math.random()*Math.PI*2;
+    const sp = (major?90:45) + Math.random()*(major?110:75);
+    state.particles.push({
+      x,y, vx:Math.cos(a)*sp, vy:Math.sin(a)*sp, g:8,
+      life:.18 + Math.random()*.5, max:.68, s:2 + Math.floor(Math.random()*4),
+      c: explosionColors[Math.floor(Math.random()*explosionColors.length)]
+    });
+  }
+  explosionTone(major);
+}
+function spark(x,y){
+  for(let i=0;i<5;i++){
+    state.particles.push({
+      x,y, vx:(Math.random()-.5)*70, vy:(Math.random()-.5)*70, g:0,
+      life:.12 + Math.random()*.08, max:.2, s:2, c:"#ffffff"
+    });
+  }
+}
+function trailParticle(x,y,hot){
+  state.particles.push({
+    x,y, vx:(Math.random()-.5)*10, vy:45+Math.random()*45, g:0,
+    life:.12+Math.random()*.18, max:.28, s:hot?2:1, c: hot ? "#00d8ff" : "#cfcfcf"
+  });
+}
+
+function draw(){
+  ctx.save();
+  if(state.shake > 0){
+    ctx.translate((Math.random()-.5)*state.shake, (Math.random()-.5)*state.shake);
+  }
+  ctx.fillStyle = "#050505";
+  ctx.fillRect(0,0,W,H);
+
+  drawStars();
+
+  if(state.screen === "menu") drawMenu();
+  if(state.screen === "game") drawGame();
+  if(state.screen === "gameover") drawGameOver();
+  if(state.screen === "upgrades") drawUpgrades();
+  if(state.screen === "highscore") drawHighScore();
+  if(state.screen === "settings") drawSettings();
+
+  if(state.flash > 0){
+    ctx.globalAlpha = Math.min(.5, state.flash*1.4);
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0,0,W,H);
+    ctx.globalAlpha = 1;
+  }
+
+  ctx.strokeStyle = "rgba(255,255,255,.4)";
+  ctx.lineWidth = 1;
+  roundRect(ctx,4,4,W-8,H-8,44);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawStars(){
+  for(const s of state.stars){
+    ctx.globalAlpha = s.a;
+    ctx.fillStyle = "#dcdcdc";
+    ctx.fillRect(Math.round(s.x), Math.round(s.y), s.s, s.s);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawMenu(){
+  centerText("STAR", 72, 32, "#ededed");
+  centerText("CORRIDOR", 111, 32, "#ededed");
+  centerText("ARCADE MODE", 150, 14, "#8f8f8f");
+
+  drawShip(W/2, 285, 1.15);
+  drawAsteroid(32, 205, 16, .2);
+  drawAsteroid(342, 234, 12, 1.2);
+  drawAsteroid(18, 620, 14, .8);
+  drawAsteroid(359, 521, 7, .3);
+
+  const items = ["START","UPGRADES","HIGH SCORE","SETTINGS"];
+  const ys = [417,469,521,573];
+  for(let i=0;i<items.length;i++){
+    if(i === state.menuIndex){
+      ctx.strokeStyle = "#e9e9e9";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(100, ys[i]-26, 190, 34);
+      text(items[i], W/2, ys[i], 18, "#ffffff", "center");
+    } else {
+      text(items[i], W/2, ys[i], 18, "#b5b5b5", "center");
+    }
+  }
+
+  centerText("PRESS START", 686, 14, "#7d7d7d");
+  text("SFX " + (save.sfx ? "ON":"OFF"), W-20, 725, 12, "#6d6d6d", "right");
+}
+
+function drawGame(){
+  text("SCORE", 20, 28, 11, "#b0b0b0");
+  text(String(Math.floor(state.score)).padStart(7,"0"), 20, 48, 20, "#efefef");
+  text("HI-SCORE", W-20, 28, 11, "#b0b0b0", "right");
+  text(String(save.hi).padStart(7,"0"), W-20, 48, 20, "#efefef", "right");
+  line(14, 63, W-14, 63, "#bdbdbd");
+
+  for(const a of state.asteroids) drawAsteroid(a.x,a.y,a.r,a.rot);
+  for(const e of state.enemies) drawEnemy(e.x,e.y);
+  for(const b of state.enemyBullets){
+    ctx.fillStyle = "#cccccc";
+    ctx.fillRect(Math.round(b.x)-1, Math.round(b.y)-2, 3, 6);
+  }
+  for(const b of state.bullets){
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(Math.round(b.x)-1, Math.round(b.y)-6, 3, 10);
+  }
+  for(const p of state.particles){
+    ctx.globalAlpha = Math.max(0, p.life/p.max);
+    ctx.fillStyle = p.c;
+    ctx.fillRect(Math.round(p.x), Math.round(p.y), p.s, p.s);
+  }
+  ctx.globalAlpha = 1;
+
+  const pl = state.player;
+  if(pl && (pl.inv <= 0 || Math.floor(pl.inv*12)%2 === 0)) drawShip(pl.x, pl.y, 1);
+
+  line(14, H-86, W-14, H-86, "#bdbdbd");
+  text("SHIELD", 20, H-60, 11, "#b0b0b0");
+  for(let i=0;i<pl.maxHp;i++){
+    ctx.strokeStyle = "#ababab";
+    ctx.strokeRect(20 + i*20, H-46, 15, 12);
+    if(i < pl.hp){ ctx.fillStyle = "#dedede"; ctx.fillRect(23 + i*20, H-43, 9, 6); }
+  }
+
+  text("SECTOR", W/2, H-60, 11, "#b0b0b0", "center");
+  text(state.sectorMajor + "-" + state.sectorMinor, W/2, H-37, 18, "#efefef", "center");
+
+  text("FUEL", W-20, H-60, 11, "#b0b0b0", "right");
+  const bw = 84, bx = W-20-bw;
+  ctx.strokeStyle = "#ababab";
+  ctx.strokeRect(bx, H-47, bw, 14);
+  ctx.fillStyle = "#dedede";
+  ctx.fillRect(bx+3, H-44, (bw-6)*(pl.boost/100), 8);
+
+  if(state.pause){
+    ctx.fillStyle = "rgba(0,0,0,.72)";
+    ctx.fillRect(0,0,W,H);
+    centerText("PAUSED", H/2-8, 28, "#ededed");
+    centerText("PRESS ESC / P", H/2+28, 11, "#7d7d7d");
+  }
+}
+
+function drawGameOver(){
+  centerText("GAME OVER", 108, 31, "#ededed");
+
+  const cx = W/2, cy = 265;
+  for(let i=0;i<28;i++){
+    const a = i/28 * Math.PI*2;
+    const r = 6 + (i%7)*3;
+    ctx.fillStyle = explosionColors[i % explosionColors.length];
+    ctx.fillRect(Math.round(cx+Math.cos(a)*r), Math.round(cy+Math.sin(a)*r), 4, 4);
+  }
+
+  centerText("SCORE", 364, 12, "#9a9a9a");
+  centerText(String(Math.floor(state.score)).padStart(7,"0"), 394, 21, "#ececec");
+  centerText("SECTOR", 437, 12, "#9a9a9a");
+  centerText(state.sectorMajor + "-" + state.sectorMinor, 468, 21, "#ececec");
+  centerText("BEST", 515, 12, "#9a9a9a");
+  centerText(String(save.hi).padStart(7,"0"), 546, 21, "#ececec");
+
+  text("> RETRY <", W/2, 617, 19, "#ececec", "center");
+  text("MENU", W/2, 663, 18, "#8d8d8d", "center");
+}
+
+function drawUpgrades(){
+  centerText("UPGRADES", 80, 31, "#ededed");
+  line(16, 111, W-16, 111, "#bdbdbd");
+  centerText("CREDITS " + String(save.credits).padStart(5,"0"), 145, 16, "#b7b7b7");
+
+  const ys = [223,303,383,463,543];
+  for(let i=0;i<upgrades.length;i++){
+    const u = upgrades[i];
+    const lvl = save.upgrades[u.key];
+    if(i === state.upgradeIndex){
+      ctx.strokeStyle = "#e8e8e8";
+      roundRect(ctx, 20, ys[i]-27, W-40, 52, 8);
+      ctx.stroke();
+    }
+
+    text(u.label, 62, ys[i], 16, "#e7e7e7");
+    for(let j=0;j<5;j++){
+      ctx.strokeStyle = "#959595";
+      ctx.strokeRect(190 + j*24, ys[i]-14, 17, 17);
+      if(j < lvl){
+        ctx.fillStyle = "#dedede";
+        ctx.fillRect(193 + j*24, ys[i]-11, 11, 11);
+      }
+    }
+
+    const price = lvl >= 5 ? "MAX" : String(Math.floor(u.cost*(1+lvl*.65))).padStart(3,"0");
+    text(price, W-28, ys[i]+1, 15, "#c4c4c4", "right");
+  }
+
+  line(16, 684, W-16, 684, "#bdbdbd");
+  text("A  BUY", 94, 730, 16, "#d6d6d6", "center");
+  text("B  BACK", W-94, 730, 16, "#d6d6d6", "center");
+}
+
+function drawHighScore(){
+  centerText("HIGH SCORE", 110, 30, "#ededed");
+  centerText(String(save.hi).padStart(7,"0"), 235, 42, "#efefef");
+  centerText("CREDITS " + String(save.credits).padStart(5,"0"), 320, 16, "#a9a9a9");
+  centerText("TAP / ENTER TO BACK", 690, 12, "#7b7b7b");
+}
+
+function drawSettings(){
+  centerText("SETTINGS", 108, 30, "#ededed");
+  line(16, 130, W-16, 130, "#bdbdbd");
+  ctx.strokeStyle = "#e8e8e8";
+  ctx.strokeRect(75, 317, 240, 40);
+  text("SFX", 105, 343, 18, "#e0e0e0");
+  text(save.sfx ? "ON" : "OFF", 286, 343, 18, "#e0e0e0", "right");
+  centerText("TAP / ENTER TO TOGGLE", 415, 12, "#8c8c8c");
+  centerText("ESC TO BACK", 690, 12, "#7b7b7b");
+}
+
+function drawShip(x,y,s=1){
+  ctx.save();
+  ctx.translate(Math.round(x), Math.round(y));
+  ctx.scale(s,s);
+  ctx.strokeStyle = "#dfdfdf";
+  ctx.lineWidth = 1;
+
+  ctx.beginPath();
+  ctx.moveTo(0,-15);
+  ctx.lineTo(5,-8);
+  ctx.lineTo(5,-2);
+  ctx.lineTo(11,3);
+  ctx.lineTo(11,8);
+  ctx.lineTo(5,6);
+  ctx.lineTo(3,14);
+  ctx.lineTo(0,10);
+  ctx.lineTo(-3,14);
+  ctx.lineTo(-5,6);
+  ctx.lineTo(-11,8);
+  ctx.lineTo(-11,3);
+  ctx.lineTo(-5,-2);
+  ctx.lineTo(-5,-8);
+  ctx.closePath();
+  ctx.stroke();
+
+  ctx.fillStyle = "#dfdfdf";
+  ctx.fillRect(-2,-9,4,8);
+  ctx.fillRect(-1,2,2,6);
+  ctx.globalAlpha = .85;
+  ctx.fillRect(-5,14,2,5);
+  ctx.fillRect(3,14,2,5);
+  ctx.globalAlpha = .45;
+  ctx.fillRect(-4,20,1,5);
+  ctx.fillRect(4,20,1,5);
+  ctx.restore();
+  ctx.globalAlpha = 1;
+}
+
+function drawEnemy(x,y){
+  ctx.save();
+  ctx.translate(Math.round(x), Math.round(y));
+  ctx.strokeStyle = "#d2d2d2";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(-6,-6,12,12);
+  ctx.beginPath();
+  ctx.moveTo(-12,-5); ctx.lineTo(-6,0); ctx.lineTo(-12,5);
+  ctx.moveTo(12,-5); ctx.lineTo(6,0); ctx.lineTo(12,5);
+  ctx.stroke();
+  ctx.fillStyle = "#dfdfdf";
+  ctx.fillRect(-2,-2,4,4);
+  ctx.restore();
+}
+
+function drawAsteroid(x,y,r,rot){
+  ctx.save();
+  ctx.translate(Math.round(x), Math.round(y));
+  ctx.rotate(rot);
+  ctx.strokeStyle = "#b7b7b7";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  const n = 8;
+  for(let i=0;i<n;i++){
+    const a = i/n * Math.PI*2;
+    const rr = r * (.8 + ((i*37)%5)*.045);
+    const px = Math.cos(a)*rr, py = Math.sin(a)*rr;
+    if(i === 0) ctx.moveTo(px,py); else ctx.lineTo(px,py);
+  }
+  ctx.closePath();
+  ctx.stroke();
+  if(r > 8){
+    ctx.globalAlpha = .65;
+    ctx.beginPath(); ctx.arc(-r*.22,-r*.08,r*.17,0,Math.PI*2); ctx.stroke();
+    ctx.beginPath(); ctx.arc(r*.22,r*.16,r*.12,0,Math.PI*2); ctx.stroke();
+  }
+  ctx.restore();
+  ctx.globalAlpha = 1;
+}
+
+function text(str,x,y,size,color="#ddd",align="left"){
+  ctx.font = `${size}px "Courier New", monospace`;
+  ctx.textAlign = align;
+  ctx.textBaseline = "alphabetic";
+  ctx.fillStyle = color;
+  ctx.fillText(str,x,y);
+}
+function centerText(str,y,size,color="#ddd"){ text(str,W/2,y,size,color,"center"); }
+function line(x1,y1,x2,y2,color="#bdbdbd"){
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();
+}
+function roundRect(c,x,y,w,h,r){
+  c.beginPath();
+  c.moveTo(x+r,y);
+  c.arcTo(x+w,y,x+w,y+h,r);
+  c.arcTo(x+w,y+h,x,y+h,r);
+  c.arcTo(x,y+h,x,y,r);
+  c.arcTo(x,y,x+w,y,r);
+  c.closePath();
+}
+
+// ---------- AUDIO ----------
+let audio = null, master = null;
+function ensureAudio(){
+  if(audio) return;
+  audio = new (window.AudioContext || window.webkitAudioContext)();
+  master = audio.createGain();
+  master.gain.value = .2;
+  master.connect(audio.destination);
+}
+function tone(freq,dur=.06,vol=.04,type="square",slide=0){
+  if(!save.sfx) return;
+  ensureAudio();
+  const o = audio.createOscillator();
+  const g = audio.createGain();
+  o.type = type;
+  o.frequency.setValueAtTime(freq, audio.currentTime);
+  if(slide) o.frequency.exponentialRampToValueAtTime(Math.max(30,freq+slide), audio.currentTime+dur);
+  g.gain.setValueAtTime(vol, audio.currentTime);
+  g.gain.exponentialRampToValueAtTime(.0001, audio.currentTime+dur);
+  o.connect(g).connect(master);
+  o.start();
+  o.stop(audio.currentTime+dur);
+}
+function noise(dur=.12,vol=.05){
+  if(!save.sfx) return;
+  ensureAudio();
+  const len = Math.floor(audio.sampleRate*dur);
+  const buf = audio.createBuffer(1, len, audio.sampleRate);
+  const data = buf.getChannelData(0);
+  for(let i=0;i<len;i++) data[i] = (Math.random()*2-1) * (1-i/len);
+  const src = audio.createBufferSource();
+  const g = audio.createGain();
+  src.buffer = buf;
+  g.gain.value = vol;
+  src.connect(g).connect(master);
+  src.start();
+}
+function blip(f=440,d=.05,v=.04){ tone(f,d,v,"square",-60); }
+function laserTone(){ tone(920,.035,.018,"square",-420); }
+function enemyShootTone(){ tone(240,.04,.015,"square",110); }
+function hitTone(){ noise(.11,.05); tone(130,.1,.035,"square",-60); }
+function explosionTone(major){ noise(major?.4:.16, major?.085:.05); tone(major?90:120, major?.3:.13, major?.05:.028, "square",-50); }
+function powerup(){ tone(420,.08,.04,"square",220); setTimeout(()=>tone(680,.09,.035,"square",160),70); }
+function fail(){ tone(120,.1,.03,"square",-40); }
+function startTone(){ tone(230,.08,.03); setTimeout(()=>tone(470,.1,.035),85); }
+function gameOverTone(){ tone(220,.12,.04,"square",-80); setTimeout(()=>tone(110,.25,.05,"square",-70),120); }
+
+["pointerdown","keydown"].forEach(ev => addEventListener(ev, () => {
+  ensureAudio();
+  if(audio.state === "suspended") audio.resume();
+}, {passive:true}));
+
+function loop(t){
+  const dt = Math.min(.033, (t - state.last)/1000 || 0);
+  state.last = t;
+  update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+})();
+</script>
+</body>
+</html>
